@@ -1,4 +1,5 @@
 package com.example.testvideostreamingserverapp;
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
@@ -14,6 +15,7 @@ import android.os.Bundle;
 import android.app.Activity;
 import android.util.Log;
 import android.view.Menu;
+import android.view.SurfaceView;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -22,7 +24,7 @@ import android.widget.TextView;
 
 public class ClientActivity extends Activity implements MediaPlayer.OnPreparedListener, MediaPlayer.OnCompletionListener {
 	public static final String TAG = ClientActivity.class.getName();
-	public static final int REQ_VIDEO_SIZE = 25000;
+	public static final int REQ_VIDEO_SIZE = ServerActivity.PACKET_SIZE*100;
 	private CameraPreview preview = null;
 	private Camera camera = null;
 	private String host = null;
@@ -34,6 +36,7 @@ public class ClientActivity extends Activity implements MediaPlayer.OnPreparedLi
 	private long lastFileLength = 0;
 	private long delayTime = 50;
 	private volatile long currFileLength = 0;
+	private SurfaceView surfaceView = null;
 	
 
     @Override
@@ -44,11 +47,12 @@ public class ClientActivity extends Activity implements MediaPlayer.OnPreparedLi
 		//setup camera
 		FrameLayout frameLayout = (FrameLayout) findViewById(R.id.frameLayout);
 		camera = getCamera();
-		preview = new CameraPreview(this, camera);
-		frameLayout.addView(preview);
+		//preview = new CameraPreview(this, camera);
+		//frameLayout.addView(preview);
+		surfaceView = (SurfaceView) findViewById(R.id.surfaceView1);
 		
 		EditText et = (EditText) findViewById(R.id.hostText);
-		et.setText("192.168.49.1");
+		et.setText("192.168.2.2");
     }
 
 
@@ -99,14 +103,23 @@ public class ClientActivity extends Activity implements MediaPlayer.OnPreparedLi
     					if(videoOs != null){
     						byte[] data = new byte[ServerActivity.DATA_BUFFER_SIZE];
     						int bytesRead = 0;
-    						while((bytesRead = is.read(data)) > 0 ){
+    						BufferedInputStream bis = new BufferedInputStream(is, ServerActivity.DATA_BUFFER_SIZE);
+    						int offset = 0;
+    						while((bytesRead = bis.read(data, offset, ServerActivity.DATA_BUFFER_SIZE-offset)) > 0 ){
     							currFileLength += bytesRead;
-    							videoOs.write(data, 0, bytesRead);
-    							videoOs.flush();
-    							if(mp==null && currFileLength >= REQ_VIDEO_SIZE){
-    								mp = new MediaPlayer();
-    								playBack(mp, videoFile);
-    							}
+    							bytesRead += offset;
+								if (bytesRead > 0 ) {
+									offset = 0;
+									videoOs.write(data, 0, bytesRead);
+									videoOs.flush();
+									if (mp == null
+											&& currFileLength >= REQ_VIDEO_SIZE) {
+										mp = new MediaPlayer();
+										playBack(mp, videoFile);
+									}
+								}else{
+									//offset = bytesRead;
+								}
     						}
     					}
     					
@@ -130,7 +143,8 @@ public class ClientActivity extends Activity implements MediaPlayer.OnPreparedLi
 			//Thread.sleep(1000);
 			lastFileLength = currFileLength;
 			mp.setDataSource(file.getAbsolutePath());
-			mp.setDisplay(preview.getHolder());
+			//mp.setDisplay(preview.getHolder());
+			mp.setDisplay(surfaceView.getHolder());
 
 			mp.setOnCompletionListener(this);
 			mp.setOnSeekCompleteListener(new MediaPlayer.OnSeekCompleteListener() {
@@ -189,7 +203,7 @@ public class ClientActivity extends Activity implements MediaPlayer.OnPreparedLi
 	
 	@Override
 	public void onPrepared(MediaPlayer mp) {
-
+		mp.setLooping(false);
 		mp.seekTo(lastDuration);
 		mp.start();
 	}
@@ -211,7 +225,7 @@ public class ClientActivity extends Activity implements MediaPlayer.OnPreparedLi
 		lastFileLength = currFileLength;
 		try{
 			mp.setDataSource(videoFile.getAbsolutePath());
-			mp.setDisplay(preview.getHolder());
+			mp.setDisplay(surfaceView.getHolder());
 			lastDuration = currDuration + totalDelay;
 			mp.setOnPreparedListener(ClientActivity.this);
 			mp.prepareAsync();

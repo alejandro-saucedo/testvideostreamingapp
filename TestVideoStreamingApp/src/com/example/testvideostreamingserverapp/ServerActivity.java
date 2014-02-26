@@ -1,5 +1,6 @@
 package com.example.testvideostreamingserverapp;
 
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
@@ -10,6 +11,8 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 
 
@@ -32,25 +35,33 @@ public class ServerActivity extends Activity {
 	
 	public static final String TAG = ServerActivity.class.getName();
 	public static final int PORT = 5678;
-	public static final int DATA_BUFFER_SIZE = 1024*2 ;
+	public static final int PACKET_SIZE = 188;
+	public static final int HEADER_SIZE = PACKET_SIZE*3;
+	public static final int DATA_BUFFER_SIZE = PACKET_SIZE*10 ;
 	private static final String LOCALSOCKETADDRESS = ServerActivity.class.getName();
 	
-	private File videoFile = null;
+	private class Client{
+		private Socket socket = null;
+		private OutputStream os = null;
+		
+		public Client(Socket socket) throws IOException{
+			this.socket = socket;
+			os = socket.getOutputStream();
+		}
+	}
+	
 	private CameraPreview preview = null;
 	private Camera camera = null;
 	private MediaRecorder recorder = null;
-	private Handler handler = null;
 	private FilePathProvider fpp = null;
-	private Thread serverThread = null;
 	private boolean recording = false;
 	private boolean mrPrepared = false;
 	private boolean serverAlive = true;
-	private boolean dpLaunched = false;
-	private byte[] data = null;
-	private Collection<OutputStream> outStreams = null;
+	private Collection<Client> clients = null;
 	
 	private ServerSocket serverSocket = null;
 	private Socket clientSocket = null;
+	private byte[] header = null;
 	
 	
 	
@@ -61,13 +72,12 @@ public class ServerActivity extends Activity {
 		setContentView(R.layout.activity_server);
 		//file provider
 		fpp = new FilePathProvider(TAG);
-		data = new byte[DATA_BUFFER_SIZE];
 		//setup camera
 		FrameLayout frameLayout = (FrameLayout) findViewById(R.id.framaLayout);
 		camera = getCamera();
 		preview = new CameraPreview(this, camera);
 		frameLayout.addView(preview);
-		outStreams = new ArrayList<OutputStream>(1);
+		clients = new LinkedList<ServerActivity.Client>();
 		launchServer();
 		launchLocalServerSocket();
 	}
@@ -76,19 +86,28 @@ public class ServerActivity extends Activity {
 	@Override
 	protected void onResume() {
 		super.onResume();
-		(new Thread() {
-			public void run() {
-				try{
-					Thread.sleep(5000);
-				}catch(InterruptedException ex){
-					ex.printStackTrace();
-				}
-				//startRecording();
-				if (!dpLaunched) {
-					//launchDataProvider();
-				}
-			};
-		}).start();
+//		if(!recording){
+//			(new Thread(){
+//				
+//				@Override
+//				public void run() {
+//					try{
+//						//wait some time for the camera surface holder to be created 
+//						Thread.sleep(1000);
+//					}catch(InterruptedException ex){
+//						ex.printStackTrace();
+//					}
+//					LocalSocket localClientSocket = new LocalSocket();
+//					try{
+//						localClientSocket.connect(new LocalSocketAddress(LOCALSOCKETADDRESS));
+//						startRecording(localClientSocket.getFileDescriptor());
+//					}catch(IOException ex){
+//						Log.e(TAG, "Error connecting to local server", ex);
+//					}
+//				}
+//				
+//			}).start();
+//		}
 	}
 	
 	@Override
@@ -101,11 +120,10 @@ public class ServerActivity extends Activity {
 	protected void onDestroy() {
 		super.onDestroy();
 		stopRecording();
-		//tearDownServer();
 	}
 	
 	public void launchServer(){
-		serverThread = new Thread() {
+		( new Thread() {
 			@Override
 			public void run() {
 				try {
@@ -113,28 +131,34 @@ public class ServerActivity extends Activity {
 					while (serverAlive) {
 						//receive client socket
 						clientSocket = serverSocket.accept();
-						if(!recording){
-							//create a local socket be the data output of the recorder
-							LocalSocket localClientSocket = new LocalSocket();
-							localClientSocket.connect(new LocalSocketAddress(LOCALSOCKETADDRESS));
-							startRecording( localClientSocket.getFileDescriptor() );
+
+						try{
+							Client client = new Client(clientSocket);
+							if(header != null){
+								client.os.write(header);
+							}
+							clients.add(client);
+						}catch(Exception ex){
+							Log.e(TAG, "error adding new client", ex);
 						}
-//						try {
-//							synchronized (outStreams) {
-//								outStreams.add(clientSocket.getOutputStream());
-//							}
-//						} catch (IOException ex) {
-//							Log.e(TAG, "error getting socket output stream", ex);
-//							ex.printStackTrace();
-//						}
 						
+						//start recording when the first client connects successfully
+						try{
+							if(!recording){
+								//create a local socket and set it as the mediarecorder data source
+								LocalSocket localClientSocket = new LocalSocket();
+								localClientSocket.connect(new LocalSocketAddress(LOCALSOCKETADDRESS));
+								startRecording( localClientSocket.getFileDescriptor() );
+							}
+						}catch(Exception ex){
+							Log.e(TAG, "problem starting to record", ex);
+						}
 					}
 				} catch (Exception ex) {
-					ex.printStackTrace();
+					Log.e(TAG, "Problem starting TCP-IP server", ex);
 				}
 			}
-		};
-		serverThread.start();
+		}).start();;
 	}
 	
 	private void launchLocalServerSocket(){
@@ -146,86 +170,67 @@ public class ServerActivity extends Activity {
 					while (true) {
 						LocalSocket localClientSocket = localServerSocket.accept();
 						InputStream is = null;
-						OutputStream os = null;
+						
 						try {
 							is = localClientSocket.getInputStream();
+							BufferedInputStream bis = new BufferedInputStream(is);
 							byte[] buff = new byte[DATA_BUFFER_SIZE];
 							int bc = 0;
-							while ((bc = is.read(buff)) > 0) {
-								if (os == null && clientSocket != null) {
-									os = clientSocket.getOutputStream();
-								}
-								if (os != null) {
-									os.write(buff, 0, bc);
-									os.flush();
+							int offset = 0;
+							
+							
+							//read header
+							if(header == null){
+								header = new byte[HEADER_SIZE];
+								boolean headerRead = false;
+								while(!headerRead && (bc = bis.read(header, offset, HEADER_SIZE-offset))>=0){
+									bc+=offset;
+									if(bc<HEADER_SIZE){
+										offset = bc;
+									}else{
+										headerRead = true;
+										offset = 0;
+										for(Client client : clients){
+											client.os.write(header, 0, header.length);
+											client.os.flush();
+										}
+									}
 								}
 							}
+							
+							while (((bc = bis.read(buff, offset, DATA_BUFFER_SIZE-offset)) >= 0)) {
+								
+								bc += offset;
+								
+								if(bc > 0 && (bc%188)==0){
+									offset = 0;
+									for(Client client : clients){
+										try{
+											client.os.write(buff, 0, bc);
+											client.os.flush();
+										}catch(Throwable ex){
+											Log.e(TAG, "problem writing to client "+client.socket.getInetAddress(), ex);
+											clients.remove(client);
+										}
+									}
+								}else{
+									offset = bc;
+								}
+							
+						}
 						} catch (IOException ex) {
-							ex.printStackTrace();
+							Log.e(TAG, "Problem reading data from local socket", ex);
 						}
 
 					}
 				} catch (Exception ex) {
-					ex.printStackTrace();
+					Log.e(TAG, "Problem starting local server", ex);
 				}
 			}
 		}).start();
 	}
 	
-	public void launchDataProvider(){
-		Thread dpThread = new Thread() {
-			@Override
-			public void run() {
-	
-				InputStream is = null;
-				try {
-
-					while (serverAlive) {
-						if (videoFile != null) {
-							try {
-								if (is == null) {
-									is = new FileInputStream(videoFile);
-								}
-								int bytesRead = 0;
-								while ((bytesRead = is.read(data)) > 0) {
-									synchronized (outStreams) {
-										for (OutputStream os : outStreams) {
-											try {
-												os.write(data, 0, bytesRead);
-												os.flush();
-											} catch (IOException ex) {
-												Log.e(TAG,
-														"error sending data to one output stream",
-														ex);
-											}
-										}
-									}
-								}
-
-							} catch (IOException ex) {
-								Log.e(TAG, "Error in data provider", ex);
-							}
-						}
-						if (serverAlive) {
-							try {
-								Thread.sleep(3000);
-							} catch (InterruptedException ex) {
-								ex.printStackTrace();
-							}
-						}
-					}
-				} catch (Exception ex) {
-					ex.printStackTrace();
-				}finally{
-					dpLaunched = false;
-				}
-			}
-		};
-		dpLaunched = true;
-		dpThread.start();
-	}
-
-	public void tearDownServer(){
+	public void shutDownServer(){
 		serverAlive = false;
 		try{
 			serverSocket.close();
@@ -234,8 +239,6 @@ public class ServerActivity extends Activity {
 			ex.printStackTrace();
 		}
 	}
-	
-	
 	
 	@Override
 	public boolean onCreateOptionsMenu(Menu menu) {
@@ -288,6 +291,7 @@ public class ServerActivity extends Activity {
 			try{
 				recorder.start();
 				recording = true;
+
 			}catch(Exception ex){
 				Log.e(TAG, "Error at recorder.start()", ex);
 				recording = false;
@@ -328,9 +332,8 @@ public class ServerActivity extends Activity {
 		
 		// Step 2: Set sources
 		//recorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER);
-		recorder.setVideoSource(MediaRecorder.VideoSource.CAMERA);           
+		recorder.setVideoSource(MediaRecorder.VideoSource.CAMERA);     
 
-       
 		// Step 3: Set a CamcorderProfile (requires API Level 8 or higher)
 		//recorder.setProfile(CamcorderProfile.get(CamcorderProfile.QUALITY_TIME_LAPSE_LOW));
 		
@@ -343,8 +346,11 @@ public class ServerActivity extends Activity {
 		recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
 		//recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB);
 		
+		
+		
 		// Step 5: Set the preview output
 		recorder.setPreviewDisplay(preview.getHolder().getSurface());
+		
 		
 		// Step 6: Prepare configured MediaRecorder
 		try{
@@ -365,4 +371,6 @@ public class ServerActivity extends Activity {
 		return prepared;
 
 	}
+	
+
 }
